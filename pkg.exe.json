@@ -1,0 +1,16 @@
+{
+  "name": "nocode-inventory-sync-exe",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "scripts/exe-server.cjs",
+  "pkg": {
+    "assets": [
+      "build-exe/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "release"
+  }
+}
+

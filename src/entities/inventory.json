@@ -1,0 +1,126 @@
+{
+  "name": "Inventory",
+  "type_name": "map",
+  "description": "部门盘点数据实体",
+  "properties": {
+    "productType": {
+      "name": "productType",
+      "type_name": "string",
+      "description": "产品类型（成品/原材料）"
+    },
+    "sequenceNumber": {
+      "name": "sequenceNumber",
+      "type_name": "integer",
+      "description": "序号"
+    },
+    "thickness": {
+      "name": "thickness",
+      "type_name": "number",
+      "description": "厚度"
+    },
+    "color": {
+      "name": "color",
+      "type_name": "string",
+      "description": "颜色"
+    },
+    "resistance": {
+      "name": "resistance",
+      "type_name": "string",
+      "description": "抗性或防静电"
+    },
+    "weightMin": {
+      "name": "weightMin",
+      "type_name": "number",
+      "description": "克重最小值"
+    },
+    "weightMax": {
+      "name": "weightMax",
+      "type_name": "number",
+      "description": "克重最大值"
+    },
+    "width": {
+      "name": "width",
+      "type_name": "number",
+      "description": "单卷宽度(mm)"
+    },
+    "length": {
+      "name": "length",
+      "type_name": "number",
+      "description": "单卷长度(m)"
+    },
+    "rollCount": {
+      "name": "rollCount",
+      "type_name": "integer",
+      "description": "该规格卷数"
+    },
+    "hasOtherSpecs": {
+      "name": "hasOtherSpecs",
+      "type_name": "string",
+      "description": "是否有其他规格"
+    },
+    "productCode": {
+      "name": "productCode",
+      "type_name": "string",
+      "description": "成品编码"
+    },
+    "productName": {
+      "name": "productName",
+      "type_name": "string",
+      "description": "成品名称"
+    },
+    "quantityPerRoll": {
+      "name": "quantityPerRoll",
+      "type_name": "integer",
+      "description": "单卷数量(pcs)"
+    },
+    "totalRolls": {
+      "name": "totalRolls",
+      "type_name": "integer",
+      "description": "共有几卷"
+    },
+    "remainders": {
+      "name": "remainders",
+      "type_name": "string",
+      "description": "尾数"
+    },
+    "isCompleted": {
+      "name": "isCompleted",
+      "type_name": "string",
+      "description": "是否完成"
+    },
+    "syncBatch": {
+      "name": "syncBatch",
+      "type_name": "string",
+      "description": "同步批次号，手机和PC使用同一批次号实时同步"
+    },
+    "recordKey": {
+      "name": "recordKey",
+      "type_name": "string",
+      "description": "客户端生成的去重键"
+    },
+    "deviceId": {
+      "name": "deviceId",
+      "type_name": "string",
+      "description": "录入设备标识"
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "type_name": "string",
+      "description": "创建时间"
+    },
+    "updatedAt": {
+      "name": "updatedAt",
+      "type_name": "string",
+      "description": "更新时间"
+    }
+  },
+  "required": [
+    "productType",
+    "thickness",
+    "resistance",
+    "weightMin",
+    "weightMax",
+    "length",
+    "width"
+  ]
+}
