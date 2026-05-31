@@ -1,6 +1,7 @@
 import { fileURLToPath, URL } from 'url';
 import { defineConfig } from 'vite';
-import { resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { dirname, resolve } from 'path';
 import { networkInterfaces, tmpdir } from 'os';
 import { devLogger } from '@meituan-nocode/vite-plugin-dev-logger';
 import { devHtmlTransformer, prodHtmlTransformer } from '@meituan-nocode/vite-plugin-nocode-html-transformer';
@@ -32,8 +33,37 @@ const buildDevNetworkInfo = (port = 8080) => {
   };
 };
 
+const LOCAL_SYNC_STORE_FILE = resolve(tmpdir(), '.nocode-dev-logs', 'inventory-sync-store.json');
+
+const loadLocalSyncStore = () => {
+  const store = new Map();
+  try {
+    if (!existsSync(LOCAL_SYNC_STORE_FILE)) return store;
+    const parsed = JSON.parse(readFileSync(LOCAL_SYNC_STORE_FILE, 'utf-8'));
+    Object.entries(parsed?.batches || {}).forEach(([batch, items]) => {
+      store.set(batch, new Map(Object.entries(items || {})));
+    });
+  } catch (error) {
+    console.warn('读取本地同步缓存失败，将使用空缓存:', error);
+  }
+  return store;
+};
+
+const persistLocalSyncStore = (store) => {
+  try {
+    const batches = {};
+    store.forEach((batchMap, batch) => {
+      batches[batch] = Object.fromEntries(batchMap.entries());
+    });
+    mkdirSync(dirname(LOCAL_SYNC_STORE_FILE), { recursive: true });
+    writeFileSync(LOCAL_SYNC_STORE_FILE, JSON.stringify({ batches }, null, 2));
+  } catch (error) {
+    console.warn('写入本地同步缓存失败:', error);
+  }
+};
+
 const createLocalSyncDevPlugin = () => {
-  const batchStore = new Map();
+  const batchStore = loadLocalSyncStore();
 
   const writeJson = (res, statusCode, payload) => {
     res.statusCode = statusCode;
@@ -101,6 +131,7 @@ const createLocalSyncDevPlugin = () => {
 
               const batchMap = getBatchMap(batch);
               batchMap.set(recordKey, normalizedItem);
+              persistLocalSyncStore(batchStore);
               writeJson(res, 200, { ok: true, item: normalizedItem, count: batchMap.size, batch, batches: Array.from(batchStore.keys()) });
             } catch (error) {
               writeJson(res, 400, { message: 'Invalid JSON body' });
@@ -117,6 +148,7 @@ const createLocalSyncDevPlugin = () => {
           } else {
             batchStore.clear();
           }
+          persistLocalSyncStore(batchStore);
           writeJson(res, 200, { ok: true });
           return;
         }
@@ -128,11 +160,13 @@ const createLocalSyncDevPlugin = () => {
 };
 
 const isProdEnv = process.env.NODE_ENV === 'production';
-const PUBLIC_PATH = isProdEnv ? process.env.PUBLIC_PATH + '/' + process.env.CHAT_VARIABLE : process.env.PUBLIC_PATH;
-const OUT_DIR = isProdEnv ? 'build/' + process.env.CHAT_VARIABLE : 'build';
+const chatVariable = process.env.CHAT_VARIABLE || '';
+const publicPath = process.env.PUBLIC_PATH || '/';
+const PUBLIC_PATH = isProdEnv && chatVariable ? `${publicPath.replace(/\/$/, '')}/${chatVariable}` : publicPath;
+const OUT_DIR = isProdEnv && chatVariable ? `build/${chatVariable}` : 'build';
 const PLUGINS = isProdEnv ? [
   react(),
-  prodHtmlTransformer(process.env.CHAT_VARIABLE)
+  ...(chatVariable ? [prodHtmlTransformer(chatVariable)] : [])
 ] : [
   devLogger({
     dirname: resolve(tmpdir(), '.nocode-dev-logs'),
@@ -163,7 +197,17 @@ export default defineConfig({
   ],
   base: PUBLIC_PATH,
   build: {
-    outDir: OUT_DIR
+    outDir: OUT_DIR,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('/xlsx/')) return 'xlsx';
+          if (id.includes('/@radix-ui/') || id.includes('/lucide-react/')) return 'ui-vendor';
+          return 'vendor';
+        },
+      },
+    },
   },
   resolve: {
     alias: [

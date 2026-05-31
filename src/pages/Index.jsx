@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import CustomKeypad from '@/components/CustomKeypad';
 import { Button } from '@/components/ui/button';
 import { Inventory } from '@/integrations/backend/entities';
+import { DEFAULT_PRODUCT_CODES } from '@/data/productCodes';
 import {
   INVENTORY_FIELD_LABELS,
   columnNameFromIndex,
@@ -50,11 +51,10 @@ export default function Index() {
   const [flash, setFlash] = useState(false);
   // 当前序号（用于跟踪新规格）
   const [currentSequence, setCurrentSequence] = useState(1);
-  const [shouldExport, setShouldExport] = useState(false);
   // 添加新的状态来存储编码与产品名称的映射
   const [productNames, setProductNames] = useState({});
-  // 添加Excel数据状态
-  const [excelData, setExcelData] = useState([]);
+  // 添加Excel数据状态（默认加载内置编码表）
+  const [excelData, setExcelData] = useState(DEFAULT_PRODUCT_CODES);
   // 添加文件上传状态
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
@@ -86,7 +86,12 @@ export default function Index() {
   const [selectedRecordKeys, setSelectedRecordKeys] = useState([]);
   const [isMobileClient, setIsMobileClient] = useState(() => isMobileClientDevice());
   const [shareableSyncUrl, setShareableSyncUrl] = useState('');
+  const [pendingDuplicateSpec, setPendingDuplicateSpec] = useState(null);
+  const [reviewMode, setReviewMode] = useState(null); // null | 'select' | 'review'
+  const [reviewType, setReviewType] = useState(null);
+  const [reviewIndex, setReviewIndex] = useState(0);
   const selectionEventLockUntilRef = React.useRef(0);
+  const deletedRecordKeysRef = React.useRef(new Set());
 
   const getLocalDeviceId = () => {
     try {
@@ -157,7 +162,7 @@ export default function Index() {
       quantityPerRoll: toNumberIfPossible(spec.quantityPerRoll),
       totalRolls: toNumberIfPossible(spec.totalRolls),
       syncBatch,
-      recordKey: makeSpecRecordKey(spec),
+      recordKey: spec.recordKey || makeSpecRecordKey(spec),
       deviceId: getLocalDeviceId(),
       updatedAt: new Date().toISOString()
     };
@@ -202,6 +207,14 @@ export default function Index() {
     return response.json();
   };
 
+  const filterDeletedRecords = (items) => {
+    if (deletedRecordKeysRef.current.size === 0) return items;
+    return items.filter(item => {
+      const key = item.recordKey || makeSpecRecordKey(item, item.syncBatch || syncBatch);
+      return !deletedRecordKeysRef.current.has(key);
+    });
+  };
+
   const mergeInventoryRecords = (localRows = [], remoteRows = []) => {
     const map = new Map();
     [...localRows, ...remoteRows].forEach((item) => {
@@ -241,8 +254,8 @@ export default function Index() {
       if (!silent) setIsSyncing(true);
       const cloudRows = await fetchCloudInventoryRows(syncBatch);
       setCloudRecordCount(cloudRows.length);
-      setRawMaterialSpecs((prev) => mergeInventoryRecords(replaceLocal ? [] : prev, cloudRows));
-      setSessionSpecs((prev) => mergeInventoryRecords(prev, cloudRows));
+      setRawMaterialSpecs((prev) => filterDeletedRecords(mergeInventoryRecords(replaceLocal ? [] : prev, cloudRows)));
+      setSessionSpecs((prev) => filterDeletedRecords(mergeInventoryRecords(prev, cloudRows)));
       setLastSyncedAt(new Date().toLocaleTimeString());
       if (USE_LOCAL_SYNC_IN_DEV) {
         setSyncStatus(`已本地同步 ${cloudRows.length} 条`);
@@ -421,8 +434,8 @@ export default function Index() {
       options: [
         '双层双抗硅胶膜', '双层硅胶膜', '单层硅胶膜', 
         '单层单抗硅胶膜', '硅胶膜', '离型膜', 
-        '双面防静电离型膜', '防静电离型膜', '原膜'
-      ] 
+        '双面防静电离型膜', '防静电离型膜', '原膜', '双面防静电原膜'
+      ]
     },
     6: { type: 'input', title: '请输入克重范围', placeholder: '最小值' },
     7: { type: 'input', title: '请输入克重范围', placeholder: '最大值' },
@@ -517,7 +530,7 @@ export default function Index() {
       // 原材料分支的"是否有其他规格"选择处理
       if (currentInput === '是') {
         // 保存当前规格数据
-        saveRawMaterialSpec();
+        saveRawMaterialSpec(updatedAnswers);
         // 重置部分答案以重新开始规格输入，但保留序号、厚度、颜色、抗性、克重
         const resetAnswers = { ...updatedAnswers };
         // 保留序号、厚度、颜色、抗性、克重最小值、克重最大值
@@ -530,6 +543,7 @@ export default function Index() {
         setCurrentQuestion(8); // 跳转到宽度输入
       } else if (currentInput === '保存该条数据添加下一条') {
         // 保存当前规格并添加下一条数据
+        saveRawMaterialSpec(updatedAnswers);
         // 重置部分答案，但保留产品类型
         const resetAnswers = { ...updatedAnswers };
         // 保留产品类型
@@ -566,8 +580,6 @@ export default function Index() {
         const allSpecs = [...rawMaterialSpecs, spec];
         // 然后导出所有数据
         exportToExcel(allSpecs);
-        // 导出后新增一条空白信息
-        setShouldExport(true);
       }
     } else if (currentQuestion === 12) {
       // 成品编码输入完成后，立即查找成品名称
@@ -587,8 +599,8 @@ export default function Index() {
       // 成品分支的"是否完成"选择处理
       if (currentInput === '完成并导出') {
         // 保存成品数据并导出
-        saveFinishedProduct(updatedAnswers); // 传递当前答案以确保包含最新数据
-        exportToExcel();
+        const savedProduct = saveFinishedProduct(updatedAnswers); // 传递当前答案以确保包含最新数据
+        exportToExcel(savedProduct ? [savedProduct] : []);
       } else {
         // 保存成品数据，重置部分状态，回到成品编码输入
         saveFinishedProduct(updatedAnswers); // 传递当前答案以确保包含最新数据
@@ -610,40 +622,42 @@ export default function Index() {
   };
 
   // 保存原材料规格数据
-  const saveRawMaterialSpec = () => {
+  const saveRawMaterialSpec = (currentAnswers = answers) => {
     const spec = {
       productType: '半成品',
       syncBatch,
-      sequenceNumber: answers[2] || currentSequence,
-      thickness: answers[3],
-      color: answers[4],
-      resistance: answers[5],
-      weightMin: answers[6],
-      weightMax: answers[7],
-      width: answers[8],
-      length: answers[9],
-      rollCount: answers[10],
-      hasOtherSpecs: answers[11]
+      sequenceNumber: currentAnswers[2] || currentSequence,
+      thickness: currentAnswers[3],
+      color: currentAnswers[4],
+      resistance: currentAnswers[5],
+      weightMin: currentAnswers[6],
+      weightMax: currentAnswers[7],
+      width: currentAnswers[8],
+      length: currentAnswers[9],
+      rollCount: currentAnswers[10],
+      hasOtherSpecs: currentAnswers[11]
     };
+    const newKey = makeSpecRecordKey(spec);
+    const isDuplicate = rawMaterialSpecs.some(existing => {
+      const existingKey = existing.recordKey || makeSpecRecordKey(existing, existing.syncBatch || syncBatch);
+      return existingKey === newKey;
+    });
+    if (isDuplicate) {
+      setPendingDuplicateSpec(spec);
+      return null;
+    }
     setRawMaterialSpecs(prev => mergeInventoryRecords(prev, [spec]));
     setSessionSpecs(prev => mergeInventoryRecords(prev, [spec]));
     void syncSpecToCloud(spec);
+    return spec;
   };
 
   // 保存成品数据
   const saveFinishedProduct = (currentAnswers = answers) => {
-    // 检查是否已经保存过相同数据
     const productCode = currentAnswers[12];
-    const existingProductIndex = rawMaterialSpecs.findIndex(
-      item => item.productType === '成品' && item.productCode === productCode
-    );
-    
-    // 确保获取最新的尾数和当前输入值
     const currentRemainders = remainders.join(', ');
-    // 获取当前输入值或答案中的完成状态
     const isCompletedValue = currentAnswers[16] || (currentQuestion === 16 ? currentInput : '');
-    
-    // 查找产品名称
+
     let productName = '请检查编码';
     if (productCode && excelData.length > 0) {
       const foundRow = excelData.find(row => row[0] === productCode);
@@ -651,7 +665,7 @@ export default function Index() {
         productName = foundRow[1];
       }
     }
-    
+
     const product = {
       productType: '成品',
       syncBatch,
@@ -659,25 +673,50 @@ export default function Index() {
       productName: productName,
       quantityPerRoll: currentAnswers[13],
       totalRolls: currentAnswers[14],
-      remainders: currentRemainders, // 使用最新的尾数
-      isCompleted: isCompletedValue // 使用当前输入值作为完成状态
+      remainders: currentRemainders,
+      isCompleted: isCompletedValue
     };
-    
-    if (existingProductIndex >= 0) {
-      // 如果已经存在相同成品编码的数据，则更新它
-      const updatedSpecs = [...rawMaterialSpecs];
-      updatedSpecs[existingProductIndex] = product;
-      setRawMaterialSpecs(mergeInventoryRecords([], updatedSpecs));
-      console.log('成品数据已更新');
+
+    // 全字段一致才视为重复（用 recordKey 比较，包含编码+数量+卷数+尾数）
+    const newKey = makeSpecRecordKey(product);
+    const isDuplicate = rawMaterialSpecs.some(existing => {
+      const existingKey = existing.recordKey || makeSpecRecordKey(existing, existing.syncBatch || syncBatch);
+      return existingKey === newKey;
+    });
+
+    if (isDuplicate) {
+      setPendingDuplicateSpec(product);
+      return null;
     } else {
-      // 如果不存在，则添加新数据
       setRawMaterialSpecs(prev => mergeInventoryRecords(prev, [product]));
-      console.log('成品数据已保存');
     }
 
     setSessionSpecs(prev => mergeInventoryRecords(prev, [product]));
 
     void syncSpecToCloud(product);
+    return product;
+  };
+
+  // 确认保存重复规格（生成唯一 key 避免云端覆盖）
+  const confirmSaveDuplicate = () => {
+    if (!pendingDuplicateSpec) return;
+    const spec = {
+      ...pendingDuplicateSpec,
+      recordKey: `${makeSpecRecordKey(pendingDuplicateSpec)}_${Date.now()}`
+    };
+    setRawMaterialSpecs(prev => [...prev, spec]);
+    setSessionSpecs(prev => [...prev, spec]);
+    void syncSpecToCloud(spec);
+    setPendingDuplicateSpec(null);
+  };
+
+  const cancelSaveDuplicate = () => setPendingDuplicateSpec(null);
+
+  // 从清单中删除记录（仅本地）
+  const deleteRecords = (recordKeys) => {
+    recordKeys.filter(Boolean).forEach(key => deletedRecordKeysRef.current.add(key));
+    setRawMaterialSpecs(prev => filterDeletedRecords(prev));
+    setSessionSpecs(prev => filterDeletedRecords(prev));
   };
 
   // 添加尾数
@@ -776,7 +815,8 @@ export default function Index() {
         '单卷数量(pcs)': spec.quantityPerRoll,
         '共有几卷': spec.totalRolls,
         '尾数': spec.remainders,
-        '是否完成': spec.isCompleted
+        '是否完成': spec.isCompleted,
+        '日期': spec.createdAt ? new Date(spec.createdAt).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN')
       }));
       
       const sheetViews = buildWorkbookSheetViews(allData);
@@ -786,12 +826,13 @@ export default function Index() {
       rawWs['!cols'] = [
         { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 },
         { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
-        { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 12 }
+        { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 12 }, { wch: 12 }
       ];
       XLSX.utils.book_append_sheet(wb, rawWs, '原始记录');
       
-      const mainSheetName = sheetViews[0]?.sheetName || '盘点清单';
-      XLSX.writeFile(wb, `${mainSheetName}_盘点数据.xlsx`);
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+      XLSX.writeFile(wb, `${dateStr}盘点数据.xlsx`);
       
       // 保存到后端，供手机和PC端继续同步
       try {
@@ -846,9 +887,7 @@ export default function Index() {
       return; // 第一题选择后直接返回，不显示操作按钮
     } else if (currentQuestion === 11) {
       // 避免重复保存数据：只在尚未保存当前规格时才保存
-      if (!answers[11]) {
-        saveRawMaterialSpec();
-      }
+      const savedSpec = !answers[11] ? saveRawMaterialSpec(updatedAnswers) : null;
       
       if (value === '是') {
         // 重置部分答案以重新开始规格输入，但保留序号、厚度、颜色、抗性、克重
@@ -880,38 +919,20 @@ export default function Index() {
         setCurrentQuestion(2);
       } else if (value === '完成并导出') {
         // 在导出前保存当前规格数据（如果尚未保存）
-        let allSpecs = [...rawMaterialSpecs];
-        if (!answers[11]) {
-          const spec = {
-            productType: '半成品',
-            sequenceNumber: updatedAnswers[2] || currentSequence,
-            thickness: updatedAnswers[3],
-            color: updatedAnswers[4],
-            resistance: updatedAnswers[5],
-            weightMin: updatedAnswers[6],
-            weightMax: updatedAnswers[7],
-            width: updatedAnswers[8],
-            length: updatedAnswers[9],
-            rollCount: updatedAnswers[10],
-            hasOtherSpecs: updatedAnswers[11]
-          };
-          allSpecs = [...allSpecs, spec];
-        }
+        const allSpecs = savedSpec ? [...rawMaterialSpecs, savedSpec] : [...rawMaterialSpecs];
         // 然后导出所有数据
         exportToExcel(allSpecs);
-        // 导出后新增一条空白信息
-        setShouldExport(true);
       }
     } else if (currentQuestion === 16) {
       // 确保当前选择的答案也被包含在内
       const finalAnswers = { ...updatedAnswers, [currentQuestion]: value };
       
       // 保存成品数据
-      saveFinishedProduct(finalAnswers);
+      const savedProduct = saveFinishedProduct(finalAnswers);
       
       if (value === '完成并导出') {
         // 如果选择"完成并导出"，导出所有数据
-        exportToExcel();
+        exportToExcel(savedProduct ? [savedProduct] : []);
       } else {
         // 如果选择"保存，下一条"，重置成品相关答案，回到成品编码输入
         const resetAnswers = { ...finalAnswers };
@@ -1031,17 +1052,6 @@ export default function Index() {
     };
   }, [syncBatch]);
 
-  // 添加 useEffect 监听数据变化并触发导出
-  useEffect(() => {
-    if (rawMaterialSpecs.length > 0 && shouldExport) {
-      exportToExcel(rawMaterialSpecs);
-      setShouldExport(false); // 重置标志位
-      // 新增一条空白信息
-      setCurrentSequence(prev => prev + 1);
-      setAnswers({});
-      setCurrentQuestion(2);
-    }
-  }, [rawMaterialSpecs, shouldExport]);
 
   // 读取源数据并生成盘点明细预览
   const handleSourceInventoryUpload = (event) => {
@@ -1194,7 +1204,14 @@ export default function Index() {
             throw new Error('Excel文件中没有数据');
           }
 
-          setExcelData(jsonData);
+          // 追加到现有数据，新上传的同编码覆盖旧的
+          setExcelData(prev => {
+            const map = new Map(prev.map(row => [String(row[0]).trim(), row]));
+            jsonData.forEach(row => {
+              if (row[0] && row[1]) map.set(String(row[0]).trim(), row);
+            });
+            return Array.from(map.values());
+          });
           console.log('Excel文件上传成功，共读取', jsonData.length, '行数据');
           
           // 清空文件输入框
@@ -1287,11 +1304,11 @@ export default function Index() {
     const quantity = item.quantityPerRoll || item[13];
     const rolls = item.totalRolls || item[14];
     const tail = item.remainders || remainders.join(', ');
-    const detail = [
+    const mainDetail = [
       isFilled(quantity) ? `${quantity}pcs` : '',
-      isFilled(rolls) ? `${rolls}RL` : '',
-      isFilled(tail) ? `尾数${tail}` : ''
+      isFilled(rolls) ? `${rolls}RL` : ''
     ].filter(Boolean).join('*');
+    const detail = [mainDetail, isFilled(tail) ? `${tail}pcs` : ''].filter(Boolean).join('+');
 
     return `编码${code}｜${name}${detail ? `｜${detail}` : ''}`;
   };
@@ -1326,11 +1343,22 @@ export default function Index() {
   };
 
   const getSavedPreviewRows = () => {
-    const recentRows = rawMaterialSpecs.slice(-3);
+    const isFinishedMode = currentQuestion >= 12 || answers[1] === '成品';
+    const filtered = rawMaterialSpecs.filter(item =>
+      isFinishedMode ? item.productType === '成品' : item.productType !== '成品'
+    );
+    // 按录入时间升序排，没有时间戳（刚录未同步）视为最新排末尾
+    const sortedByTime = [...filtered].sort((a, b) => {
+      if (!a.createdAt && !b.createdAt) return 0;
+      if (!a.createdAt) return 1;
+      if (!b.createdAt) return -1;
+      return String(a.createdAt).localeCompare(String(b.createdAt));
+    });
+    const recentRows = sortedByTime.slice(-3);
     const labelsByCount = {
-      1: ['最新'],
-      2: ['上一条', '最新'],
-      3: ['上上条', '上一条', '最新']
+      1: ['上一条'],
+      2: ['上上条', '上一条'],
+      3: ['上上上条', '上上条', '上一条']
     };
     const labels = labelsByCount[recentRows.length] || [];
 
@@ -1419,11 +1447,116 @@ export default function Index() {
       }));
   };
 
+  // 显示用分组：同宽×长的多条卷数合并相加
+  const buildDisplayGroupedRows = (items = []) => {
+    const grouped = new Map();
+
+    items.forEach((item, index) => {
+      const sequenceValue = isFilled(item.sequenceNumber) ? String(item.sequenceNumber).trim() : '';
+      const productName = formatRawProductName(item);
+      const groupKey = `${sequenceValue}|${productName}`;
+
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          __groupKey: groupKey,
+          sequenceNumber: isFilled(item.sequenceNumber) ? item.sequenceNumber : '',
+          productName,
+          specGroups: new Map(),
+          areaSum: 0,
+          hasArea: false,
+          memberRecordKeys: [],
+          order: index,
+        });
+      }
+
+      const current = grouped.get(groupKey);
+      const specSubKey = `${normalizeKeyValue(item.width)}|${normalizeKeyValue(item.length)}`;
+      const rollNum = readNumericValue(item.rollCount) || 0;
+
+      if (current.specGroups.has(specSubKey)) {
+        current.specGroups.get(specSubKey).rollCount += rollNum;
+      } else {
+        current.specGroups.set(specSubKey, { width: item.width, length: item.length, rollCount: rollNum });
+      }
+
+      const areaValue = calculateRawArea(item);
+      if (areaValue !== '' && Number.isFinite(Number(areaValue))) {
+        current.areaSum += Number(areaValue);
+        current.hasArea = true;
+      }
+
+      const key = item.__recordKey || item.recordKey;
+      if (key) current.memberRecordKeys.push(key);
+    });
+
+    return Array.from(grouped.values())
+      .sort((a, b) => {
+        const aSeq = Number(a.sequenceNumber ?? 0);
+        const bSeq = Number(b.sequenceNumber ?? 0);
+        if (Number.isFinite(aSeq) && Number.isFinite(bSeq) && aSeq !== bSeq) return aSeq - bSeq;
+        return a.order - b.order;
+      })
+      .map(({ specGroups, order, ...item }) => ({
+        ...item,
+        specText: Array.from(specGroups.values())
+          .map(sg => [
+            isFilled(sg.width) ? addUnit(sg.width, 'mm') : '',
+            isFilled(sg.length) ? addUnit(sg.length, 'm') : '',
+            sg.rollCount ? `${sg.rollCount}RL` : ''
+          ].filter(Boolean).join('*'))
+          .filter(Boolean)
+          .join('+') || '未填写规格',
+        area: item.hasArea ? roundArea(item.areaSum) : '',
+        memberRecordKeys: Array.from(new Set(item.memberRecordKeys)),
+      }));
+  };
+
+  // 成品显示用分组：同编码+单卷数量的多条，卷数和尾数合并相加
+  const buildFinishedDisplayGroupedRows = (items = []) => {
+    const grouped = new Map();
+
+    items.forEach((item, index) => {
+      const code = String(item.productCode || '').trim();
+      const qty = normalizeKeyValue(item.quantityPerRoll);
+      const groupKey = `${code}|${qty}`;
+
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          __groupKey: groupKey,
+          productCode: item.productCode || '',
+          productName: item.productName || '',
+          quantityPerRoll: item.quantityPerRoll,
+          totalRolls: 0,
+          remainderSum: 0,
+          hasRemainders: false,
+          memberRecordKeys: [],
+          order: index,
+        });
+      }
+
+      const current = grouped.get(groupKey);
+      current.totalRolls += readNumericValue(item.totalRolls) || 0;
+      const tail = sumFinishedTailQuantity(item.remainders);
+      if (tail > 0) { current.remainderSum += tail; current.hasRemainders = true; }
+
+      const key = item.__recordKey || item.recordKey;
+      if (key) current.memberRecordKeys.push(key);
+    });
+
+    return Array.from(grouped.values())
+      .sort((a, b) => a.order - b.order)
+      .map(({ order, ...item }) => ({
+        ...item,
+        memberRecordKeys: Array.from(new Set(item.memberRecordKeys)),
+      }));
+  };
+
   const buildHalfProductSheetRows = (items = []) => buildHalfProductGroupedRows(items).map((item, index) => ([
     isFilled(item.sequenceNumber) ? item.sequenceNumber : index + 1,
     item.productName,
     item.specText || '',
-    item.area === '' ? '' : item.area
+    item.area === '' ? '' : item.area,
+    new Date().toLocaleDateString('zh-CN')
   ]));
 
   const buildFinishedProductSheetRows = (items = []) => items.map((item, index) => {
@@ -1431,18 +1564,19 @@ export default function Index() {
     const rolls = readNumericValue(item.totalRolls);
     const tailSum = sumFinishedTailQuantity(item.remainders);
     const total = quantity !== null && rolls !== null ? quantity * rolls + tailSum : '';
-    const detail = [
+    const mainDetail = [
       isFilled(item.quantityPerRoll) ? `${item.quantityPerRoll}pcs` : '',
-      isFilled(item.totalRolls) ? `${item.totalRolls}RL` : '',
-      isFilled(item.remainders) ? `尾数${item.remainders}` : ''
+      isFilled(item.totalRolls) ? `${item.totalRolls}RL` : ''
     ].filter(Boolean).join('*');
+    const detail = [mainDetail, isFilled(item.remainders) ? `${item.remainders}pcs` : ''].filter(Boolean).join('+');
 
     return [
       isFilled(item.sequenceNumber) ? item.sequenceNumber : index + 1,
       item.productCode || '',
       item.productName || productNames[item.productCode] || '请检查编码',
       detail,
-      total
+      total,
+      new Date().toLocaleDateString('zh-CN')
     ];
   });
 
@@ -1454,18 +1588,18 @@ export default function Index() {
     if (halfProductItems.length > 0) {
       views.push({
         sheetName: '半成品',
-        headers: ['序号', '材料&产品名称', '规格', '面积'],
+        headers: ['序号', '材料&产品名称', '规格', '面积', '日期'],
         rows: buildHalfProductSheetRows(halfProductItems),
-        widths: [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }]
+        widths: [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }]
       });
     }
 
     if (finishedProductItems.length > 0) {
       views.push({
         sheetName: '成品',
-        headers: ['序号', '成品编码', '成品名称', '数量明细', '合计pcs'],
+        headers: ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期'],
         rows: buildFinishedProductSheetRows(finishedProductItems),
-        widths: [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }]
+        widths: [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }]
       });
     }
 
@@ -1473,11 +1607,11 @@ export default function Index() {
       const defaultType = answers[1] === '成品' ? '成品' : '半成品';
       views.push({
         sheetName: defaultType,
-        headers: defaultType === '成品' ? ['序号', '成品编码', '成品名称', '数量明细', '合计pcs'] : ['序号', '材料&产品名称', '规格', '面积'],
+        headers: defaultType === '成品' ? ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期'] : ['序号', '材料&产品名称', '规格', '面积', '日期'],
         rows: [],
         widths: defaultType === '成品'
-          ? [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }]
-          : [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }]
+          ? [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }]
+          : [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }]
       });
     }
 
@@ -1516,7 +1650,7 @@ export default function Index() {
   );
 
   const halfPreviewGroups = React.useMemo(
-    () => buildHalfProductGroupedRows(halfPreviewRecords),
+    () => buildDisplayGroupedRows(halfPreviewRecords),
     [halfPreviewRecords]
   );
 
@@ -1524,6 +1658,45 @@ export default function Index() {
     () => visiblePreviewRecords.filter((item) => item.productType === '成品'),
     [visiblePreviewRecords]
   );
+
+  const finishedPreviewGroups = React.useMemo(
+    () => buildFinishedDisplayGroupedRows(finishedPreviewRecords),
+    [finishedPreviewRecords]
+  );
+
+  const reviewRecords = React.useMemo(() => {
+    if (!reviewType) return [];
+    const filtered = rawMaterialSpecs.filter(item =>
+      reviewType === '成品' ? item.productType === '成品' : item.productType !== '成品'
+    );
+    return [...filtered].sort((a, b) => {
+      const aSeq = Number(a.sequenceNumber ?? Infinity);
+      const bSeq = Number(b.sequenceNumber ?? Infinity);
+      if (Number.isFinite(aSeq) && Number.isFinite(bSeq) && aSeq !== bSeq) return aSeq - bSeq;
+      return String(a.productCode || a.createdAt || '').localeCompare(String(b.productCode || b.createdAt || ''));
+    });
+  }, [rawMaterialSpecs, reviewType]);
+
+  const reviewDisplayGroups = React.useMemo(() => {
+    if (reviewType === '半成品') return buildDisplayGroupedRows(reviewRecords);
+    if (reviewType === '成品') return buildFinishedDisplayGroupedRows(reviewRecords);
+    return [];
+  }, [reviewRecords, reviewType]);
+
+  const reviewTotal = reviewDisplayGroups.length;
+  const currentReviewItem = reviewDisplayGroups[reviewIndex] || null;
+
+  const enterReview = (type) => {
+    setReviewType(type);
+    setReviewIndex(0);
+    setReviewMode('review');
+  };
+
+  const exitReview = () => {
+    setReviewMode(null);
+    setReviewType(null);
+    setReviewIndex(0);
+  };
 
   useEffect(() => {
     setSelectedRecordKeys((prev) =>
@@ -1583,6 +1756,143 @@ export default function Index() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">
+      {/* 复检浮动入口（手机端右上角） */}
+      {isMobileClient && !reviewMode && (
+        <button
+          className="fixed top-3 right-3 z-30 bg-indigo-500 text-white text-xs font-semibold rounded-full px-3 py-1.5 shadow-lg active:bg-indigo-700"
+          onClick={() => setReviewMode('select')}
+        >
+          复检
+        </button>
+      )}
+
+      {/* 复检覆盖层 */}
+      {reviewMode && (
+        <div className="fixed inset-0 bg-gray-50 z-40 flex flex-col">
+          {/* 顶部标题栏 */}
+          <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200 shadow-sm shrink-0">
+            <h2 className="text-base font-bold text-gray-900">
+              {reviewMode === 'select' ? '复检' : `复检 · ${reviewType}`}
+            </h2>
+            <button className="text-sm text-indigo-600 font-medium px-2 py-1" onClick={exitReview}>
+              返回
+            </button>
+          </div>
+
+          {/* 选类型 */}
+          {reviewMode === 'select' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-5 p-6">
+              <Button className="w-full max-w-xs h-16 text-lg" onClick={() => enterReview('半成品')}>
+                半成品
+              </Button>
+              <Button className="w-full max-w-xs h-16 text-lg" variant="outline" onClick={() => enterReview('成品')}>
+                成品
+              </Button>
+            </div>
+          )}
+
+          {/* 逐条查看 */}
+          {reviewMode === 'review' && reviewTotal === 0 && (
+            <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
+              暂无{reviewType}记录，请先录入数据
+            </div>
+          )}
+
+          {reviewMode === 'review' && currentReviewItem && (
+            <>
+              {/* 进度条 */}
+              <div className="text-center py-2 text-xs text-gray-400 shrink-0">
+                第 {reviewIndex + 1} 条 / 共 {reviewTotal} 条
+              </div>
+
+              {/* 记录内容 */}
+              <div className="flex-1 overflow-y-auto p-4">
+                <div className="bg-white rounded-2xl p-6 shadow-sm space-y-4">
+                  {reviewType === '半成品' ? (
+                    <>
+                      <div className="text-sm font-medium text-gray-400">序号 {currentReviewItem.sequenceNumber}</div>
+                      <div className="text-2xl font-bold text-gray-900 leading-snug">{currentReviewItem.productName}</div>
+                      <div className="text-xl text-gray-600">{currentReviewItem.specText}</div>
+                      {currentReviewItem.area !== '' && (
+                        <div className="text-xl text-indigo-600 font-semibold">
+                          面积：{currentReviewItem.area} m²
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-sm font-medium text-gray-400">{currentReviewItem.productCode}</div>
+                      <div className="text-2xl font-bold text-gray-900 leading-snug">
+                        {currentReviewItem.productName || '未匹配名称'}
+                      </div>
+                      <div className="text-xl text-gray-600">
+                        {[
+                          isFilled(currentReviewItem.quantityPerRoll) ? `${currentReviewItem.quantityPerRoll}pcs` : '',
+                          currentReviewItem.totalRolls ? `${currentReviewItem.totalRolls}RL` : ''
+                        ].filter(Boolean).join('*')}
+                        {currentReviewItem.hasRemainders ? `+${currentReviewItem.remainderSum}pcs` : ''}
+                      </div>
+                      {(() => {
+                        const qty = readNumericValue(currentReviewItem.quantityPerRoll);
+                        const total = qty !== null ? qty * currentReviewItem.totalRolls + currentReviewItem.remainderSum : null;
+                        return total !== null ? (
+                          <div className="text-2xl font-bold text-indigo-600">合计：{total} pcs</div>
+                        ) : null;
+                      })()}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* 导航按钮 */}
+              <div className="flex gap-3 p-4 bg-white border-t border-gray-200 shrink-0">
+                <Button
+                  variant="outline"
+                  className="flex-1 h-12 text-base"
+                  disabled={reviewIndex === 0}
+                  onClick={() => setReviewIndex(prev => prev - 1)}
+                >
+                  上一个
+                </Button>
+                <Button
+                  className="flex-1 h-12 text-base"
+                  disabled={reviewIndex >= reviewTotal - 1}
+                  onClick={() => setReviewIndex(prev => prev + 1)}
+                >
+                  下一个
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {pendingDuplicateSpec && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 max-w-sm w-full shadow-2xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">记录已存在</h3>
+            {pendingDuplicateSpec.productType === '成品' ? (
+              <p className="text-sm text-gray-600 mb-1">
+                编码 {pendingDuplicateSpec.productCode}｜{pendingDuplicateSpec.productName}
+              </p>
+            ) : (
+              <p className="text-sm text-gray-600 mb-1">
+                序号 {pendingDuplicateSpec.sequenceNumber}｜
+                {[
+                  pendingDuplicateSpec.thickness && `${pendingDuplicateSpec.thickness}um`,
+                  pendingDuplicateSpec.color,
+                  pendingDuplicateSpec.resistance
+                ].filter(Boolean).join(' ')}
+              </p>
+            )}
+            <p className="text-sm text-gray-500 mb-5">此记录已存在，是否仍要保存一条新记录？</p>
+            <div className="flex gap-3">
+              <Button onClick={cancelSaveDuplicate} variant="outline" className="flex-1">不保存</Button>
+              <Button onClick={confirmSaveDuplicate} className="flex-1">保存</Button>
+            </div>
+          </div>
+        </div>
+      )}
       {!isMobileClient && (
         <div className="mb-4 rounded-lg border border-indigo-100 bg-white p-3 shadow-sm">
           <div className="mb-2 flex items-start justify-between gap-2">
@@ -1678,6 +1988,7 @@ export default function Index() {
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">材料&产品名称</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">规格</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">面积</th>
+                            <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">操作</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1694,11 +2005,15 @@ export default function Index() {
                                 {isFilled(item.sequenceNumber) ? item.sequenceNumber : rowIndex + 1}
                               </td>
                               <td className="border border-gray-300 px-2 py-2 text-left">{item.productName}</td>
-                              <td className="border border-gray-300 px-2 py-2 text-left">
-                                {item.specText || ''}
-                              </td>
+                              <td className="border border-gray-300 px-2 py-2 text-left">{item.specText}</td>
+                              <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{item.area}</td>
                               <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
-                                {item.area}
+                                <button
+                                  onClick={() => deleteRecords(item.memberRecordKeys)}
+                                  className="text-red-500 hover:text-red-700 text-xs"
+                                >
+                                  删除
+                                </button>
                               </td>
                             </tr>
                           ))}
@@ -1707,50 +2022,51 @@ export default function Index() {
                     </div>
                   )}
 
-                  {finishedPreviewRecords.length > 0 && (
+                  {finishedPreviewGroups.length > 0 && (
                     <div className="overflow-x-auto rounded bg-white shadow-sm">
                       <div className="border-b bg-gray-100 px-3 py-2 text-sm font-bold text-gray-800">成品</div>
                       <table className="min-w-full border-collapse text-xs text-gray-800">
                         <thead>
                           <tr>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">选择</th>
-                            <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">序号</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">成品编码</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">成品名称</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">数量明细</th>
                             <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">合计pcs</th>
+                            <th className="border border-gray-300 bg-white px-2 py-2 text-center font-bold whitespace-nowrap">操作</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {finishedPreviewRecords.map((item, rowIndex) => {
-                            const quantity = readNumericValue(item.quantityPerRoll);
-                            const rolls = readNumericValue(item.totalRolls);
-                            const tailSum = sumFinishedTailQuantity(item.remainders);
-                            const total = quantity !== null && rolls !== null ? quantity * rolls + tailSum : '';
-                            const detail = [
+                          {finishedPreviewGroups.map((item, rowIndex) => {
+                            const qty = readNumericValue(item.quantityPerRoll);
+                            const total = qty !== null ? qty * item.totalRolls + item.remainderSum : '';
+                            const mainDetail = [
                               isFilled(item.quantityPerRoll) ? `${item.quantityPerRoll}pcs` : '',
-                              isFilled(item.totalRolls) ? `${item.totalRolls}RL` : '',
-                              isFilled(item.remainders) ? `尾数${item.remainders}` : ''
+                              item.totalRolls ? `${item.totalRolls}RL` : ''
                             ].filter(Boolean).join('*');
+                            const detail = [mainDetail, item.hasRemainders ? `${item.remainderSum}pcs` : ''].filter(Boolean).join('+');
 
                             return (
-                              <tr key={`finished-${item.__recordKey}-${rowIndex}`}>
+                              <tr key={`finished-${item.__groupKey}-${rowIndex}`}>
                                 <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
                                   <input
                                     type="checkbox"
-                                    checked={selectedRecordKeys.includes(item.__recordKey)}
-                                    onChange={() => toggleRecordSelection(item.__recordKey)}
+                                    checked={isHalfGroupSelected(item)}
+                                    onChange={() => toggleHalfGroupSelection(item)}
                                   />
                                 </td>
-                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
-                                  {isFilled(item.sequenceNumber) ? item.sequenceNumber : rowIndex + 1}
-                                </td>
-                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{item.productCode || ''}</td>
-                                <td className="border border-gray-300 px-2 py-2 text-left">
-                                  {item.productName || productNames[item.productCode] || '请检查编码'}
-                                </td>
+                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{item.productCode}</td>
+                                <td className="border border-gray-300 px-2 py-2 text-left">{item.productName || '请检查编码'}</td>
                                 <td className="border border-gray-300 px-2 py-2 text-left">{detail}</td>
                                 <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{total}</td>
+                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
+                                  <button
+                                    onClick={() => deleteRecords(item.memberRecordKeys)}
+                                    className="text-red-500 hover:text-red-700 text-xs"
+                                  >
+                                    删除
+                                  </button>
+                                </td>
                               </tr>
                             );
                           })}
@@ -1917,7 +2233,7 @@ export default function Index() {
         {/* 成功提示 */}
         {excelData.length > 0 && !uploadError && !isUploading && (
           <div className="mt-2 text-sm text-green-600 bg-green-50 p-2 rounded">
-            Excel文件已成功加载，共 {excelData.length} 行数据
+            编码表已就绪，共 {excelData.length} 条（含内置 {DEFAULT_PRODUCT_CODES.length} 条，上传文件可追加或覆盖同编码）
           </div>
         )}
         

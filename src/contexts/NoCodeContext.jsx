@@ -4,7 +4,8 @@ import { authWeb } from '../integrations/backend/backendClient';
 const NoCodeContext = createContext();
 
 export const NoCodeProvider = ({ children }) => {
-    const [isReady, setIsReady] = useState(false);
+    // In dev mode, skip nocode platform auth entirely (uses local sync)
+    const [isReady, setIsReady] = useState(import.meta.env.DEV);
     const [user, setUser] = useState(null);
     const initializedRef = useRef(false);
 
@@ -15,8 +16,10 @@ export const NoCodeProvider = ({ children }) => {
         const initializeAuth = async () => {
             if (isReady) return;
 
+            const timeout = new Promise(resolve => setTimeout(() => resolve({ render: true, _timedOut: true }), 3000));
+
             try {
-                const result = await authWeb.login();
+                const result = await Promise.race([authWeb.login(), timeout]);
                 if (result?.render) {
                     if (result.token) {
                         const userInfo = await authWeb.getUserInfo();
@@ -35,6 +38,7 @@ export const NoCodeProvider = ({ children }) => {
                 }
             } catch (err) {
                 console.error('认证初始化失败:', err);
+                setIsReady(true);
             }
         };
 
