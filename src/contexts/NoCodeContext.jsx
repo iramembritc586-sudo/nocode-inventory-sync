@@ -4,8 +4,8 @@ import { authWeb } from '../integrations/backend/backendClient';
 const NoCodeContext = createContext();
 
 export const NoCodeProvider = ({ children }) => {
-    // In dev mode, skip nocode platform auth entirely (uses local sync)
-    const [isReady, setIsReady] = useState(import.meta.env.DEV);
+    // In dev/exe mode, skip nocode platform auth entirely (uses local sync)
+    const [isReady, setIsReady] = useState(import.meta.env.DEV || import.meta.env.MODE === 'exe');
     const [user, setUser] = useState(null);
     const initializedRef = useRef(false);
 

@@ -16,7 +16,7 @@ import {
 
 const MOBILE_UA_REGEX = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Windows Phone/i;
 const LOCAL_SYNC_API_PATH = '/__local_sync__/inventory';
-const USE_LOCAL_SYNC_IN_DEV = import.meta.env.DEV || import.meta.env.VITE_USE_LOCAL_SYNC === 'true';
+const USE_LOCAL_SYNC_IN_DEV = import.meta.env.DEV || import.meta.env.MODE === 'exe' || import.meta.env.VITE_USE_LOCAL_SYNC === 'true';
 const SELECTION_EVENT_LOCK_MS = 380;
 const LOCAL_NETWORK_INFO_API_PATH = '/__local_sync__/network';
 
