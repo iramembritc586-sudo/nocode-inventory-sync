@@ -11,13 +11,16 @@ const buildDevNetworkInfo = (port = 8080) => {
   const localUrl = `http://127.0.0.1:${port}`;
   const interfaces = networkInterfaces();
   const lanIps = [];
+  const isUsableLanIp = (ip = '') => /^192\.168\./.test(ip)
+    || /^10\./.test(ip)
+    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip);
 
   Object.entries(interfaces).forEach(([name, list]) => {
     (list || []).forEach((addressInfo) => {
       const isIPv4 = addressInfo.family === 'IPv4' || addressInfo.family === 4;
       if (!isIPv4 || addressInfo.internal) return;
       const ip = String(addressInfo.address || '').trim();
-      if (!ip || ip.startsWith('169.254.')) return;
+      if (!isUsableLanIp(ip)) return;
       lanIps.push({
         ip,
         name,
@@ -143,7 +146,10 @@ const createLocalSyncDevPlugin = () => {
         if (method === 'DELETE') {
           const requestUrl = new URL(req.url || '/', 'http://localhost');
           const batch = (requestUrl.searchParams.get('batch') || '').trim();
-          if (batch) {
+          const recordKey = (requestUrl.searchParams.get('recordKey') || '').trim();
+          if (batch && recordKey) {
+            getBatchMap(batch).delete(recordKey);
+          } else if (batch) {
             batchStore.delete(batch);
           } else {
             batchStore.clear();

@@ -90,6 +90,13 @@ export default function Index() {
   const [reviewMode, setReviewMode] = useState(null); // null | 'select' | 'review'
   const [reviewType, setReviewType] = useState(null);
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewMarks, setReviewMarks] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('inventory_review_marks') || '{}');
+    } catch (error) {
+      return {};
+    }
+  });
   const selectionEventLockUntilRef = React.useRef(0);
   const deletedRecordKeysRef = React.useRef(new Set());
 
@@ -174,6 +181,21 @@ export default function Index() {
     return normalized;
   };
 
+  const withLocalRecordMetadata = (spec = {}) => {
+    const nowIso = new Date().toISOString();
+    const metadataSpec = {
+      ...spec,
+      syncBatch: spec.syncBatch || syncBatch,
+      createdAt: spec.createdAt || nowIso,
+      updatedAt: spec.updatedAt || nowIso,
+    };
+
+    return {
+      ...metadataSpec,
+      recordKey: spec.recordKey || makeSpecRecordKey(metadataSpec, metadataSpec.syncBatch),
+    };
+  };
+
   const extractRowsFromBackendResponse = (response) => {
     if (Array.isArray(response)) return response;
     if (Array.isArray(response?.data)) return response.data;
@@ -207,6 +229,21 @@ export default function Index() {
     return response.json();
   };
 
+  const deleteLocalInventoryRow = async (recordKey, batch = syncBatch) => {
+    if (!recordKey) return;
+    const params = new URLSearchParams();
+    params.set('batch', batch || 'default');
+    params.set('recordKey', recordKey);
+
+    const response = await fetch(`${LOCAL_SYNC_API_PATH}?${params.toString()}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) {
+      throw new Error(`本地同步删除失败（${response.status}）`);
+    }
+  };
+
   const filterDeletedRecords = (items) => {
     if (deletedRecordKeysRef.current.size === 0) return items;
     return items.filter(item => {
@@ -214,6 +251,8 @@ export default function Index() {
       return !deletedRecordKeysRef.current.has(key);
     });
   };
+
+  const getRecordTimeValue = (item = {}) => String(item.createdAt || item.updatedAt || '');
 
   const mergeInventoryRecords = (localRows = [], remoteRows = []) => {
     const map = new Map();
@@ -224,10 +263,12 @@ export default function Index() {
     });
 
     return Array.from(map.values()).sort((a, b) => {
+      const timeCompare = getRecordTimeValue(a).localeCompare(getRecordTimeValue(b));
+      if (timeCompare !== 0) return timeCompare;
       const aSeq = Number(a.sequenceNumber ?? 0);
       const bSeq = Number(b.sequenceNumber ?? 0);
       if (Number.isFinite(aSeq) && Number.isFinite(bSeq) && aSeq !== bSeq) return aSeq - bSeq;
-      return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+      return String(a.recordKey || '').localeCompare(String(b.recordKey || ''));
     });
   };
 
@@ -255,7 +296,7 @@ export default function Index() {
       const cloudRows = await fetchCloudInventoryRows(syncBatch);
       setCloudRecordCount(cloudRows.length);
       setRawMaterialSpecs((prev) => filterDeletedRecords(mergeInventoryRecords(replaceLocal ? [] : prev, cloudRows)));
-      setSessionSpecs((prev) => filterDeletedRecords(mergeInventoryRecords(prev, cloudRows)));
+      setSessionSpecs((prev) => filterDeletedRecords(mergeInventoryRecords(replaceLocal ? [] : prev, cloudRows)));
       setLastSyncedAt(new Date().toLocaleTimeString());
       if (USE_LOCAL_SYNC_IN_DEV) {
         setSyncStatus(`已本地同步 ${cloudRows.length} 条`);
@@ -432,9 +473,9 @@ export default function Index() {
       type: 'selection', 
       title: '请选择抗性或防静电', 
       options: [
-        '双层双抗硅胶膜', '双层硅胶膜', '单层硅胶膜', 
-        '单层单抗硅胶膜', '硅胶膜', '离型膜', 
-        '双面防静电离型膜', '防静电离型膜', '原膜', '双面防静电原膜'
+        '双层双抗硅胶膜', '双面防静电离型膜', '单层硅胶膜', 
+        '防静电离型膜', '硅胶膜', '离型膜', 
+        '双层硅胶膜', '原膜', '单层单抗硅胶膜', '双面防静电原膜'
       ]
     },
     6: { type: 'input', title: '请输入克重范围', placeholder: '最小值' },
@@ -623,7 +664,7 @@ export default function Index() {
 
   // 保存原材料规格数据
   const saveRawMaterialSpec = (currentAnswers = answers) => {
-    const spec = {
+    const spec = withLocalRecordMetadata({
       productType: '半成品',
       syncBatch,
       sequenceNumber: currentAnswers[2] || currentSequence,
@@ -636,7 +677,8 @@ export default function Index() {
       length: currentAnswers[9],
       rollCount: currentAnswers[10],
       hasOtherSpecs: currentAnswers[11]
-    };
+    });
+    deletedRecordKeysRef.current.delete(spec.recordKey);
     const newKey = makeSpecRecordKey(spec);
     const isDuplicate = rawMaterialSpecs.some(existing => {
       const existingKey = existing.recordKey || makeSpecRecordKey(existing, existing.syncBatch || syncBatch);
@@ -666,7 +708,7 @@ export default function Index() {
       }
     }
 
-    const product = {
+    const product = withLocalRecordMetadata({
       productType: '成品',
       syncBatch,
       productCode: currentAnswers[12],
@@ -675,7 +717,8 @@ export default function Index() {
       totalRolls: currentAnswers[14],
       remainders: currentRemainders,
       isCompleted: isCompletedValue
-    };
+    });
+    deletedRecordKeysRef.current.delete(product.recordKey);
 
     // 全字段一致才视为重复（用 recordKey 比较，包含编码+数量+卷数+尾数）
     const newKey = makeSpecRecordKey(product);
@@ -700,10 +743,11 @@ export default function Index() {
   // 确认保存重复规格（生成唯一 key 避免云端覆盖）
   const confirmSaveDuplicate = () => {
     if (!pendingDuplicateSpec) return;
-    const spec = {
+    const spec = withLocalRecordMetadata({
       ...pendingDuplicateSpec,
       recordKey: `${makeSpecRecordKey(pendingDuplicateSpec)}_${Date.now()}`
-    };
+    });
+    deletedRecordKeysRef.current.delete(spec.recordKey);
     setRawMaterialSpecs(prev => [...prev, spec]);
     setSessionSpecs(prev => [...prev, spec]);
     void syncSpecToCloud(spec);
@@ -712,11 +756,20 @@ export default function Index() {
 
   const cancelSaveDuplicate = () => setPendingDuplicateSpec(null);
 
-  // 从清单中删除记录（仅本地）
+  // 从清单中删除记录，并同步删除同批次服务端记录
   const deleteRecords = (recordKeys) => {
-    recordKeys.filter(Boolean).forEach(key => deletedRecordKeysRef.current.add(key));
+    const keys = recordKeys.filter(Boolean);
+    keys.forEach(key => deletedRecordKeysRef.current.add(key));
     setRawMaterialSpecs(prev => filterDeletedRecords(prev));
     setSessionSpecs(prev => filterDeletedRecords(prev));
+    setSelectedRecordKeys(prev => prev.filter(key => !keys.includes(key)));
+
+    if (USE_LOCAL_SYNC_IN_DEV) {
+      Promise.all(keys.map(key => deleteLocalInventoryRow(key, syncBatch))).catch((error) => {
+        console.error('同步删除记录失败:', error);
+        setSyncError('删除已在本机生效，但同步删除失败，请点“立即同步”确认。');
+      });
+    }
   };
 
   // 添加尾数
@@ -816,7 +869,8 @@ export default function Index() {
         '共有几卷': spec.totalRolls,
         '尾数': spec.remainders,
         '是否完成': spec.isCompleted,
-        '日期': spec.createdAt ? new Date(spec.createdAt).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN')
+        '日期': spec.createdAt ? new Date(spec.createdAt).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN'),
+        '备注': getRecordReviewRemark(spec)
       }));
       
       const sheetViews = buildWorkbookSheetViews(allData);
@@ -826,7 +880,7 @@ export default function Index() {
       rawWs['!cols'] = [
         { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 },
         { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
-        { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 12 }, { wch: 12 }
+        { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 24 }
       ];
       XLSX.utils.book_append_sheet(wb, rawWs, '原始记录');
       
@@ -1018,6 +1072,14 @@ export default function Index() {
     }
   }, [syncBatch]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('inventory_review_marks', JSON.stringify(reviewMarks));
+    } catch (error) {
+      console.warn('保存复检备注失败:', error);
+    }
+  }, [reviewMarks]);
+
   // 检测是否为移动端：移动端隐藏“实时同步”和“源数据导入整理”模块
   useEffect(() => {
     const handleDeviceChange = () => {
@@ -1044,7 +1106,7 @@ export default function Index() {
     };
 
     run({ replaceLocal: true, silent: false });
-    const timer = window.setInterval(() => run({ replaceLocal: false, silent: true }), 3000);
+    const timer = window.setInterval(() => run({ replaceLocal: true, silent: true }), 3000);
 
     return () => {
       stopped = true;
@@ -1397,6 +1459,23 @@ export default function Index() {
       .reduce((sum, item) => sum + item, 0);
   };
 
+  const makeReviewMarkKey = (groupKey) => `${syncBatch || 'default'}|${groupKey}`;
+
+  const getRecordReviewGroupKey = (item = {}) => {
+    if (item.productType === '成品') {
+      const name = item.productName || productNames[item.productCode] || '请检查编码';
+      return `${String(item.productCode || '').trim()}|${name}`;
+    }
+
+    const sequenceValue = isFilled(item.sequenceNumber) ? String(item.sequenceNumber).trim() : '';
+    return `${sequenceValue}|${formatRawProductName(item)}`;
+  };
+
+  const getRecordReviewRemark = (item = {}) => {
+    const mark = reviewMarks[makeReviewMarkKey(getRecordReviewGroupKey(item))];
+    return mark?.marked ? (mark.note || '') : '';
+  };
+
   const buildHalfProductGroupedRows = (items = []) => {
     const grouped = new Map();
 
@@ -1508,36 +1587,60 @@ export default function Index() {
           .join('+') || '未填写规格',
         area: item.hasArea ? roundArea(item.areaSum) : '',
         memberRecordKeys: Array.from(new Set(item.memberRecordKeys)),
+        remark: reviewMarks[makeReviewMarkKey(item.__groupKey)]?.note || '',
+        isMarked: Boolean(reviewMarks[makeReviewMarkKey(item.__groupKey)]?.marked),
       }));
   };
 
-  // 成品显示用分组：同编码+单卷数量的多条，卷数和尾数合并相加
+  // 成品显示用分组：同编码+同名称合并，数量明细按单卷数量分段汇总
   const buildFinishedDisplayGroupedRows = (items = []) => {
     const grouped = new Map();
 
     items.forEach((item, index) => {
       const code = String(item.productCode || '').trim();
-      const qty = normalizeKeyValue(item.quantityPerRoll);
-      const groupKey = `${code}|${qty}`;
+      const name = item.productName || productNames[item.productCode] || '请检查编码';
+      const groupKey = `${code}|${name}`;
 
       if (!grouped.has(groupKey)) {
         grouped.set(groupKey, {
           __groupKey: groupKey,
           productCode: item.productCode || '',
-          productName: item.productName || '',
-          quantityPerRoll: item.quantityPerRoll,
-          totalRolls: 0,
-          remainderSum: 0,
-          hasRemainders: false,
+          productName: name,
+          detailGroups: new Map(),
+          total: 0,
+          hasTotal: false,
           memberRecordKeys: [],
           order: index,
         });
       }
 
       const current = grouped.get(groupKey);
-      current.totalRolls += readNumericValue(item.totalRolls) || 0;
+      const qtyKey = normalizeKeyValue(item.quantityPerRoll);
+      const quantity = readNumericValue(item.quantityPerRoll);
+      const rolls = readNumericValue(item.totalRolls);
       const tail = sumFinishedTailQuantity(item.remainders);
-      if (tail > 0) { current.remainderSum += tail; current.hasRemainders = true; }
+
+      if (!current.detailGroups.has(qtyKey)) {
+        current.detailGroups.set(qtyKey, {
+          quantityPerRoll: item.quantityPerRoll,
+          totalRolls: 0,
+          tailSum: 0,
+          hasRemainders: false,
+        });
+      }
+
+      const detailGroup = current.detailGroups.get(qtyKey);
+      detailGroup.totalRolls += rolls || 0;
+      detailGroup.tailSum += tail;
+      if (tail > 0) detailGroup.hasRemainders = true;
+
+      if (quantity !== null && rolls !== null) {
+        current.total += quantity * rolls + tail;
+        current.hasTotal = true;
+      } else if (tail > 0) {
+        current.total += tail;
+        current.hasTotal = true;
+      }
 
       const key = item.__recordKey || item.recordKey;
       if (key) current.memberRecordKeys.push(key);
@@ -1545,40 +1648,116 @@ export default function Index() {
 
     return Array.from(grouped.values())
       .sort((a, b) => a.order - b.order)
-      .map(({ order, ...item }) => ({
+      .map(({ detailGroups, order, ...item }) => ({
         ...item,
+        detail: Array.from(detailGroups.values())
+          .map((detailGroup) => {
+            const mainDetail = [
+              isFilled(detailGroup.quantityPerRoll) ? `${detailGroup.quantityPerRoll}pcs` : '',
+              detailGroup.totalRolls ? `${detailGroup.totalRolls}RL` : ''
+            ].filter(Boolean).join('*');
+            return [mainDetail, detailGroup.hasRemainders ? `${detailGroup.tailSum}pcs` : '']
+              .filter(Boolean)
+              .join('+');
+          })
+          .filter(Boolean)
+          .join('+'),
+        total: item.hasTotal ? item.total : '',
         memberRecordKeys: Array.from(new Set(item.memberRecordKeys)),
+        remark: reviewMarks[makeReviewMarkKey(item.__groupKey)]?.note || '',
+        isMarked: Boolean(reviewMarks[makeReviewMarkKey(item.__groupKey)]?.marked),
       }));
   };
 
-  const buildHalfProductSheetRows = (items = []) => buildHalfProductGroupedRows(items).map((item, index) => ([
+  const buildHalfProductSheetRows = (items = []) => buildDisplayGroupedRows(items).map((item, index) => ([
     isFilled(item.sequenceNumber) ? item.sequenceNumber : index + 1,
     item.productName,
     item.specText || '',
     item.area === '' ? '' : item.area,
-    new Date().toLocaleDateString('zh-CN')
+    new Date().toLocaleDateString('zh-CN'),
+    item.isMarked ? (item.remark || '') : ''
   ]));
 
-  const buildFinishedProductSheetRows = (items = []) => items.map((item, index) => {
-    const quantity = readNumericValue(item.quantityPerRoll);
-    const rolls = readNumericValue(item.totalRolls);
-    const tailSum = sumFinishedTailQuantity(item.remainders);
-    const total = quantity !== null && rolls !== null ? quantity * rolls + tailSum : '';
-    const mainDetail = [
-      isFilled(item.quantityPerRoll) ? `${item.quantityPerRoll}pcs` : '',
-      isFilled(item.totalRolls) ? `${item.totalRolls}RL` : ''
-    ].filter(Boolean).join('*');
-    const detail = [mainDetail, isFilled(item.remainders) ? `${item.remainders}pcs` : ''].filter(Boolean).join('+');
+  const buildFinishedProductGroupedRows = (items = []) => {
+    const grouped = new Map();
 
-    return [
-      isFilled(item.sequenceNumber) ? item.sequenceNumber : index + 1,
-      item.productCode || '',
-      item.productName || productNames[item.productCode] || '请检查编码',
-      detail,
-      total,
-      new Date().toLocaleDateString('zh-CN')
-    ];
-  });
+    items.forEach((item, index) => {
+      const code = String(item.productCode || '').trim();
+      const name = item.productName || productNames[item.productCode] || '请检查编码';
+      const groupKey = `${code}|${name}`;
+
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          productCode: item.productCode || '',
+          productName: name,
+          detailGroups: new Map(),
+          totalSum: 0,
+          hasTotal: false,
+          order: index,
+        });
+      }
+
+      const current = grouped.get(groupKey);
+      const qtyKey = normalizeKeyValue(item.quantityPerRoll);
+      const quantity = readNumericValue(item.quantityPerRoll);
+      const rolls = readNumericValue(item.totalRolls);
+      const tailSum = sumFinishedTailQuantity(item.remainders);
+
+      if (!current.detailGroups.has(qtyKey)) {
+        current.detailGroups.set(qtyKey, {
+          quantityPerRoll: item.quantityPerRoll,
+          totalRolls: 0,
+          tailSum: 0,
+          hasRemainders: false,
+        });
+      }
+
+      const detailGroup = current.detailGroups.get(qtyKey);
+      detailGroup.totalRolls += rolls || 0;
+      detailGroup.tailSum += tailSum;
+      if (tailSum > 0) detailGroup.hasRemainders = true;
+
+      if (quantity !== null && rolls !== null) {
+        current.totalSum += quantity * rolls + tailSum;
+        current.hasTotal = true;
+      } else if (tailSum > 0) {
+        current.totalSum += tailSum;
+        current.hasTotal = true;
+      }
+    });
+
+    return Array.from(grouped.values())
+      .sort((a, b) => a.order - b.order)
+      .map(({ detailGroups, order, ...item }) => ({
+        ...item,
+        detail: Array.from(detailGroups.values())
+          .map((detailGroup) => {
+            const mainDetail = [
+              isFilled(detailGroup.quantityPerRoll) ? `${detailGroup.quantityPerRoll}pcs` : '',
+              detailGroup.totalRolls ? `${detailGroup.totalRolls}RL` : ''
+            ].filter(Boolean).join('*');
+            return [mainDetail, detailGroup.hasRemainders ? `${detailGroup.tailSum}pcs` : '']
+              .filter(Boolean)
+              .join('+');
+          })
+          .filter(Boolean)
+          .join('+'),
+        total: item.hasTotal ? item.totalSum : '',
+        remark: reviewMarks[makeReviewMarkKey(`${item.productCode || ''}|${item.productName || ''}`)]?.marked
+          ? (reviewMarks[makeReviewMarkKey(`${item.productCode || ''}|${item.productName || ''}`)]?.note || '')
+          : '',
+      }));
+  };
+
+  const buildFinishedProductSheetRows = (items = []) => buildFinishedProductGroupedRows(items).map((item, index) => ([
+    index + 1,
+    item.productCode || '',
+    item.productName || '请检查编码',
+    item.detail,
+    item.total,
+    new Date().toLocaleDateString('zh-CN'),
+    item.remark || ''
+  ]));
 
   const buildWorkbookSheetViews = (items = []) => {
     const halfProductItems = items.filter((item) => item.productType && item.productType !== '成品');
@@ -1588,18 +1767,18 @@ export default function Index() {
     if (halfProductItems.length > 0) {
       views.push({
         sheetName: '半成品',
-        headers: ['序号', '材料&产品名称', '规格', '面积', '日期'],
+        headers: ['序号', '材料&产品名称', '规格', '面积', '日期', '备注'],
         rows: buildHalfProductSheetRows(halfProductItems),
-        widths: [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }]
+        widths: [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }, { wch: 24 }]
       });
     }
 
     if (finishedProductItems.length > 0) {
       views.push({
         sheetName: '成品',
-        headers: ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期'],
+        headers: ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期', '备注'],
         rows: buildFinishedProductSheetRows(finishedProductItems),
-        widths: [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }]
+        widths: [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }, { wch: 24 }]
       });
     }
 
@@ -1607,11 +1786,11 @@ export default function Index() {
       const defaultType = answers[1] === '成品' ? '成品' : '半成品';
       views.push({
         sheetName: defaultType,
-        headers: defaultType === '成品' ? ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期'] : ['序号', '材料&产品名称', '规格', '面积', '日期'],
+        headers: defaultType === '成品' ? ['序号', '成品编码', '成品名称', '数量明细', '合计pcs', '日期', '备注'] : ['序号', '材料&产品名称', '规格', '面积', '日期', '备注'],
         rows: [],
         widths: defaultType === '成品'
-          ? [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }]
-          : [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }]
+          ? [{ wch: 8 }, { wch: 18 }, { wch: 36 }, { wch: 42 }, { wch: 14 }, { wch: 12 }, { wch: 24 }]
+          : [{ wch: 8 }, { wch: 38 }, { wch: 72 }, { wch: 12 }, { wch: 12 }, { wch: 24 }]
       });
     }
 
@@ -1651,7 +1830,7 @@ export default function Index() {
 
   const halfPreviewGroups = React.useMemo(
     () => buildDisplayGroupedRows(halfPreviewRecords),
-    [halfPreviewRecords]
+    [halfPreviewRecords, reviewMarks, syncBatch]
   );
 
   const finishedPreviewRecords = React.useMemo(
@@ -1661,7 +1840,7 @@ export default function Index() {
 
   const finishedPreviewGroups = React.useMemo(
     () => buildFinishedDisplayGroupedRows(finishedPreviewRecords),
-    [finishedPreviewRecords]
+    [finishedPreviewRecords, productNames, reviewMarks, syncBatch]
   );
 
   const reviewRecords = React.useMemo(() => {
@@ -1670,10 +1849,9 @@ export default function Index() {
       reviewType === '成品' ? item.productType === '成品' : item.productType !== '成品'
     );
     return [...filtered].sort((a, b) => {
-      const aSeq = Number(a.sequenceNumber ?? Infinity);
-      const bSeq = Number(b.sequenceNumber ?? Infinity);
-      if (Number.isFinite(aSeq) && Number.isFinite(bSeq) && aSeq !== bSeq) return aSeq - bSeq;
-      return String(a.productCode || a.createdAt || '').localeCompare(String(b.productCode || b.createdAt || ''));
+      const timeCompare = getRecordTimeValue(a).localeCompare(getRecordTimeValue(b));
+      if (timeCompare !== 0) return timeCompare;
+      return String(a.recordKey || '').localeCompare(String(b.recordKey || ''));
     });
   }, [rawMaterialSpecs, reviewType]);
 
@@ -1681,10 +1859,36 @@ export default function Index() {
     if (reviewType === '半成品') return buildDisplayGroupedRows(reviewRecords);
     if (reviewType === '成品') return buildFinishedDisplayGroupedRows(reviewRecords);
     return [];
-  }, [reviewRecords, reviewType]);
+  }, [reviewRecords, reviewType, productNames, reviewMarks, syncBatch]);
 
   const reviewTotal = reviewDisplayGroups.length;
   const currentReviewItem = reviewDisplayGroups[reviewIndex] || null;
+  const currentReviewMark = currentReviewItem ? reviewMarks[makeReviewMarkKey(currentReviewItem.__groupKey)] : null;
+
+  const updateReviewMark = (groupKey, patch) => {
+    if (!groupKey) return;
+    const markKey = makeReviewMarkKey(groupKey);
+    setReviewMarks((prev) => {
+      const nextMark = {
+        marked: false,
+        note: '',
+        ...(prev[markKey] || {}),
+        ...patch,
+      };
+      const next = { ...prev };
+      if (!nextMark.marked && !nextMark.note) {
+        delete next[markKey];
+      } else {
+        next[markKey] = nextMark;
+      }
+      return next;
+    });
+  };
+
+  const toggleCurrentReviewMark = () => {
+    if (!currentReviewItem) return;
+    updateReviewMark(currentReviewItem.__groupKey, { marked: !currentReviewMark?.marked });
+  };
 
   const enterReview = (type) => {
     setReviewType(type);
@@ -1748,6 +1952,16 @@ export default function Index() {
     exportToExcel(exportRecords, { resetAfterExport: false, useAdditionalOnly: true });
   };
 
+  const handleReviewExport = () => {
+    if (reviewRecords.length === 0) {
+      setSyncError(`暂无可导出的${reviewType || ''}复检数据`);
+      return;
+    }
+
+    setSyncError('');
+    exportToExcel(reviewRecords, { resetAfterExport: false, useAdditionalOnly: true });
+  };
+
   const question = getCurrentQuestion();
   
   if (!question) {
@@ -1774,9 +1988,16 @@ export default function Index() {
             <h2 className="text-base font-bold text-gray-900">
               {reviewMode === 'select' ? '复检' : `复检 · ${reviewType}`}
             </h2>
-            <button className="text-sm text-indigo-600 font-medium px-2 py-1" onClick={exitReview}>
-              返回
-            </button>
+            <div className="flex items-center gap-2">
+              {reviewMode === 'review' && (
+                <button className="text-sm text-indigo-600 font-medium px-2 py-1" onClick={handleReviewExport}>
+                  导出
+                </button>
+              )}
+              <button className="text-sm text-indigo-600 font-medium px-2 py-1" onClick={exitReview}>
+                返回
+              </button>
+            </div>
           </div>
 
           {/* 选类型 */}
@@ -1807,7 +2028,19 @@ export default function Index() {
 
               {/* 记录内容 */}
               <div className="flex-1 overflow-y-auto p-4">
-                <div className="bg-white rounded-2xl p-6 shadow-sm space-y-4">
+                <div className="bg-white rounded-2xl p-6 shadow-sm space-y-4 relative">
+                  <button
+                    type="button"
+                    className={[
+                      'absolute right-0 top-5 h-16 w-7 rounded-l-full border text-[11px] font-semibold shadow-sm',
+                      currentReviewMark?.marked
+                        ? 'border-amber-300 bg-amber-400 text-white'
+                        : 'border-gray-200 bg-gray-50 text-gray-400'
+                    ].join(' ')}
+                    onClick={toggleCurrentReviewMark}
+                  >
+                    标记
+                  </button>
                   {reviewType === '半成品' ? (
                     <>
                       <div className="text-sm font-medium text-gray-400">序号 {currentReviewItem.sequenceNumber}</div>
@@ -1826,20 +2059,22 @@ export default function Index() {
                         {currentReviewItem.productName || '未匹配名称'}
                       </div>
                       <div className="text-xl text-gray-600">
-                        {[
-                          isFilled(currentReviewItem.quantityPerRoll) ? `${currentReviewItem.quantityPerRoll}pcs` : '',
-                          currentReviewItem.totalRolls ? `${currentReviewItem.totalRolls}RL` : ''
-                        ].filter(Boolean).join('*')}
-                        {currentReviewItem.hasRemainders ? `+${currentReviewItem.remainderSum}pcs` : ''}
+                        {currentReviewItem.detail}
                       </div>
-                      {(() => {
-                        const qty = readNumericValue(currentReviewItem.quantityPerRoll);
-                        const total = qty !== null ? qty * currentReviewItem.totalRolls + currentReviewItem.remainderSum : null;
-                        return total !== null ? (
-                          <div className="text-2xl font-bold text-indigo-600">合计：{total} pcs</div>
-                        ) : null;
-                      })()}
+                      {currentReviewItem.total !== '' && (
+                        <div className="text-2xl font-bold text-indigo-600">合计：{currentReviewItem.total} pcs</div>
+                      )}
                     </>
+                  )}
+                  {currentReviewMark?.marked && (
+                    <div className="pt-2">
+                      <textarea
+                        value={currentReviewMark?.note || ''}
+                        onChange={(event) => updateReviewMark(currentReviewItem.__groupKey, { note: event.target.value })}
+                        placeholder="填写复检备注"
+                        className="w-full min-h-24 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-gray-800 outline-none focus:border-amber-400"
+                      />
+                    </div>
                   )}
                 </div>
               </div>
@@ -2037,16 +2272,7 @@ export default function Index() {
                           </tr>
                         </thead>
                         <tbody>
-                          {finishedPreviewGroups.map((item, rowIndex) => {
-                            const qty = readNumericValue(item.quantityPerRoll);
-                            const total = qty !== null ? qty * item.totalRolls + item.remainderSum : '';
-                            const mainDetail = [
-                              isFilled(item.quantityPerRoll) ? `${item.quantityPerRoll}pcs` : '',
-                              item.totalRolls ? `${item.totalRolls}RL` : ''
-                            ].filter(Boolean).join('*');
-                            const detail = [mainDetail, item.hasRemainders ? `${item.remainderSum}pcs` : ''].filter(Boolean).join('+');
-
-                            return (
+                          {finishedPreviewGroups.map((item, rowIndex) => (
                               <tr key={`finished-${item.__groupKey}-${rowIndex}`}>
                                 <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
                                   <input
@@ -2057,8 +2283,8 @@ export default function Index() {
                                 </td>
                                 <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{item.productCode}</td>
                                 <td className="border border-gray-300 px-2 py-2 text-left">{item.productName || '请检查编码'}</td>
-                                <td className="border border-gray-300 px-2 py-2 text-left">{detail}</td>
-                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{total}</td>
+                                <td className="border border-gray-300 px-2 py-2 text-left">{item.detail}</td>
+                                <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">{item.total}</td>
                                 <td className="border border-gray-300 px-2 py-2 text-center whitespace-nowrap">
                                   <button
                                     onClick={() => deleteRecords(item.memberRecordKeys)}
@@ -2068,8 +2294,7 @@ export default function Index() {
                                   </button>
                                 </td>
                               </tr>
-                            );
-                          })}
+                          ))}
                         </tbody>
                       </table>
                     </div>

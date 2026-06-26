@@ -223,7 +223,15 @@ function getMimeType(filePath) {
 }
 
 function isVirtualInterfaceName(interfaceName) {
-  return /(loopback|vmware|virtualbox|vbox|hyper-v|vethernet|docker|tailscale|zerotier|wsl|tap|tun|bridge)/i.test(interfaceName);
+  return /(loopback|vmware|virtualbox|vbox|hyper-v|vethernet|docker|tailscale|zerotier|wsl|tap|tun|bridge|mihomo|clash|proxy|vpn)/i.test(interfaceName);
+}
+
+function isUsableLanIp(ip) {
+  if (!ip || ip.startsWith('127.') || ip.startsWith('169.254.')) return false;
+  if (/^198\.18\./.test(ip) || /^198\.19\./.test(ip)) return false;
+  return /^192\.168\./.test(ip)
+    || /^10\./.test(ip)
+    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip);
 }
 
 function getPrivateRangeWeight(ip) {
@@ -231,7 +239,7 @@ function getPrivateRangeWeight(ip) {
   if (/^10\./.test(ip)) return 24;
   const octets = ip.split('.').map((value) => Number(value));
   if (octets.length === 4 && octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return 18;
-  return 6;
+  return 0;
 }
 
 function getInterfaceNameWeight(interfaceName) {
@@ -249,10 +257,8 @@ function getLanCandidates() {
     (interfaceList || []).forEach((addressInfo) => {
       const isIPv4 = addressInfo.family === 'IPv4' || addressInfo.family === 4;
       if (!isIPv4 || addressInfo.internal) return;
-      if (String(addressInfo.address || '').startsWith('169.254.')) return;
-
       const ip = String(addressInfo.address || '').trim();
-      if (!ip) return;
+      if (!isUsableLanIp(ip)) return;
 
       const score = getPrivateRangeWeight(ip) + getInterfaceNameWeight(interfaceName);
       candidates.push({
@@ -288,7 +294,7 @@ function getPreferredIpFromRoutingTable() {
 
       const ip = match[1];
       const metric = Number(match[2]);
-      if (!ip || ip === '0.0.0.0' || ip.startsWith('127.') || ip.startsWith('169.254.')) return;
+      if (!isUsableLanIp(ip)) return;
       if (!Number.isFinite(metric)) return;
 
       entries.push({ ip, metric });
@@ -429,7 +435,10 @@ async function handleLocalSyncApi(req, res, requestUrl, batchStore, dataFilePath
 
   if (method === 'DELETE') {
     const batch = (requestUrl.searchParams.get('batch') || '').trim();
-    if (batch) {
+    const recordKey = (requestUrl.searchParams.get('recordKey') || '').trim();
+    if (batch && recordKey) {
+      getBatchMap(batchStore, batch).delete(recordKey);
+    } else if (batch) {
       batchStore.delete(batch);
     } else {
       batchStore.clear();
